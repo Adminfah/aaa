@@ -17,13 +17,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show repository files
+      - name: Show files
         run: |
-          echo "Current directory:"
           pwd
+          ls -lah
 
-          echo "Repository files:"
-          find . -maxdepth 3 -type d | sort
+      - name: Extract project ZIP
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "HTV811D.zip" ]; then
+            echo "ERROR: HTV811D.zip not found"
+            exit 1
+          fi
+
+          mkdir -p extracted
+          unzip -q HTV811D.zip -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -print
 
       - name: Show Xcode version
         run: |
@@ -35,21 +47,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          PROJECT_PATH="$(find "$GITHUB_WORKSPACE" \
-            -name 'HTVANTIX.xcodeproj' \
+          PROJECT_PATH="$(find "$GITHUB_WORKSPACE/extracted" \
+            -name '*.xcodeproj' \
             -type d \
             -print \
             -quit)"
 
           if [ -z "$PROJECT_PATH" ]; then
-            echo "ERROR: HTVANTIX.xcodeproj not found"
+            echo "ERROR: No .xcodeproj found inside HTV811D.zip"
             echo ""
-            echo "Available Xcode projects:"
-            find "$GITHUB_WORKSPACE" -name '*.xcodeproj' -type d || true
+            echo "Extracted contents:"
+            find "$GITHUB_WORKSPACE/extracted" -maxdepth 6 -print
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_PATH")"
+          PROJECT_NAME="$(basename "$PROJECT_PATH")"
 
           echo "Found project:"
           echo "$PROJECT_PATH"
@@ -60,7 +73,7 @@ jobs:
           echo "project_path=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Show schemes
+      - name: Show available schemes
         shell: bash
         run: |
           set -euo pipefail
@@ -69,16 +82,16 @@ jobs:
             -project "${{ steps.project.outputs.project_path }}" \
             -list
 
-      - name: Build app unsigned
+      - name: Build unsigned app
         shell: bash
         run: |
           set -euo pipefail
 
           PROJECT_PATH="${{ steps.project.outputs.project_path }}"
           PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
-          BUILD_DIR="$PROJECT_DIR/build"
+          BUILD_DIR="$GITHUB_WORKSPACE/build"
 
-          echo "Building project:"
+          echo "Building:"
           echo "$PROJECT_PATH"
 
           xcodebuild clean build \
@@ -92,40 +105,41 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Package IPA
+      - name: Find built app
+        id: app
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
-          BUILD_DIR="$PROJECT_DIR/build"
-          PRODUCT_DIR="$BUILD_DIR/Build/Products/Release-iphoneos"
-          IPA_DIR="$GITHUB_WORKSPACE/ipa"
-
-          echo "Searching for .app in:"
-          echo "$PRODUCT_DIR"
-
-          APP_PATH="$(find "$PRODUCT_DIR" \
-            -maxdepth 1 \
+          APP_PATH="$(find "$GITHUB_WORKSPACE/build/Build/Products" \
             -name '*.app' \
             -type d \
             -print \
             -quit)"
 
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app file found"
-            find "$BUILD_DIR" -maxdepth 6 -type d -name '*.app' || true
+            echo "ERROR: No .app produced"
+            find "$GITHUB_WORKSPACE/build" -maxdepth 8 -print || true
             exit 1
           fi
 
           echo "Found app:"
           echo "$APP_PATH"
 
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="${{ steps.app.outputs.app_path }}"
+
           rm -rf "$GITHUB_WORKSPACE/Payload"
-          rm -rf "$IPA_DIR"
+          rm -rf "$GITHUB_WORKSPACE/ipa"
 
           mkdir -p "$GITHUB_WORKSPACE/Payload"
-          mkdir -p "$IPA_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/ipa"
 
           cp -R "$APP_PATH" "$GITHUB_WORKSPACE/Payload/"
 
@@ -133,11 +147,11 @@ jobs:
 
           /usr/bin/zip \
             -qry \
-            "$IPA_DIR/HTVANTIX-unsigned.ipa" \
+            ipa/HTVANTIX-unsigned.ipa \
             Payload
 
-          echo "IPA created:"
-          ls -lh "$IPA_DIR"
+          echo "IPA created successfully:"
+          ls -lh ipa/
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
