@@ -1,0 +1,57 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    defaults:
+      run:
+        working-directory: HTVANTIX_3105_BASE_UI_SECURITY_MERGE
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build app unsigned
+        run: |
+          set -euo pipefail
+          xcodebuild clean build \
+            -project HTVANTIX.xcodeproj \
+            -scheme HTVANTIX \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -n 1)"
+          test -n "$APP_PATH"
+
+          rm -rf Payload ipa
+          mkdir -p Payload ipa
+          cp -R "$APP_PATH" Payload/
+          /usr/bin/zip -qry ipa/HTVANTIX-unsigned.ipa Payload
+          ls -lh ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: HTVANTIX-unsigned-ipa
+          path: HTVANTIX_3105_BASE_UI_SECURITY_MERGE/ipa/*.ipa
+          if-no-files-found: error
