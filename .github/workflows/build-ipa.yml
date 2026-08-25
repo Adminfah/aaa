@@ -14,7 +14,7 @@ env:
   PROJECT_NAME: HTVANTIX.xcodeproj
   SCHEME: HTVANTIX
   CONFIGURATION: Release
-  BUNDLE_ID: app.maroon1006.garlic5667
+  BUNDLE_ID: com.apple.mobile.MobileHouseArrest
   EXPORT_METHOD: ad-hoc
   CODE_SIGN_IDENTITY: Apple Distribution
 
