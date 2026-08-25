@@ -17,12 +17,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show files
+      - name: Show repository files
         run: |
           pwd
           ls -lah
 
       - name: Extract project ZIP
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -31,40 +32,66 @@ jobs:
             exit 1
           fi
 
+          rm -rf extracted
           mkdir -p extracted
+
           unzip -q HTV811D.zip -d extracted
 
-          echo "Extracted files:"
-          find extracted -maxdepth 4 -print
+          # Remove macOS metadata folders
+          find extracted -type d -name "__MACOSX" -prune -exec rm -rf {} + || true
+
+          # Remove AppleDouble metadata files
+          find extracted -type f -name "._*" -delete || true
+
+          echo "Extracted project:"
+          find extracted -maxdepth 5 -print
 
       - name: Show Xcode version
         run: |
           xcodebuild -version
 
-      - name: Find Xcode project
+      - name: Find valid Xcode project
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_PATH="$(find "$GITHUB_WORKSPACE/extracted" \
-            -name '*.xcodeproj' \
-            -type d \
-            -print \
-            -quit)"
+          PROJECT_PATH=""
+
+          while IFS= read -r candidate; do
+            if [ -f "$candidate/project.pbxproj" ]; then
+              PROJECT_PATH="$candidate"
+              break
+            fi
+          done < <(
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type d \
+              -name '*.xcodeproj' \
+              ! -path '*/__MACOSX/*'
+          )
 
           if [ -z "$PROJECT_PATH" ]; then
-            echo "ERROR: No .xcodeproj found inside HTV811D.zip"
+            echo "ERROR: No valid .xcodeproj containing project.pbxproj was found."
             echo ""
-            echo "Extracted contents:"
-            find "$GITHUB_WORKSPACE/extracted" -maxdepth 6 -print
+            echo "All .xcodeproj directories:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type d \
+              -name '*.xcodeproj' \
+              ! -path '*/__MACOSX/*' \
+              -print || true
+
+            echo ""
+            echo "Searching for project.pbxproj:"
+            find "$GITHUB_WORKSPACE/extracted" \
+              -name 'project.pbxproj' \
+              -print || true
+
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_PATH")"
-          PROJECT_NAME="$(basename "$PROJECT_PATH")"
 
-          echo "Found project:"
+          echo "Valid Xcode project found:"
           echo "$PROJECT_PATH"
 
           echo "Project directory:"
@@ -78,6 +105,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Project:"
+          echo "${{ steps.project.outputs.project_path }}"
+
           xcodebuild \
             -project "${{ steps.project.outputs.project_path }}" \
             -list
@@ -88,11 +118,9 @@ jobs:
           set -euo pipefail
 
           PROJECT_PATH="${{ steps.project.outputs.project_path }}"
-          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
           BUILD_DIR="$GITHUB_WORKSPACE/build"
 
-          echo "Building:"
-          echo "$PROJECT_PATH"
+          rm -rf "$BUILD_DIR"
 
           xcodebuild clean build \
             -project "$PROJECT_PATH" \
@@ -112,23 +140,29 @@ jobs:
           set -euo pipefail
 
           APP_PATH="$(find "$GITHUB_WORKSPACE/build/Build/Products" \
-            -name '*.app' \
             -type d \
+            -name '*.app' \
             -print \
             -quit)"
 
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app produced"
-            find "$GITHUB_WORKSPACE/build" -maxdepth 8 -print || true
+            echo "ERROR: No .app was produced."
+
+            echo ""
+            echo "Build products:"
+            find "$GITHUB_WORKSPACE/build/Build/Products" \
+              -maxdepth 5 \
+              -print || true
+
             exit 1
           fi
 
-          echo "Found app:"
+          echo "App found:"
           echo "$APP_PATH"
 
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Package IPA
+      - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +184,7 @@ jobs:
             ipa/HTVANTIX-unsigned.ipa \
             Payload
 
-          echo "IPA created successfully:"
+          echo "IPA created:"
           ls -lh ipa/
 
       - name: Upload IPA
