@@ -7,11 +7,11 @@ permissions:
   contents: read
 
 env:
-  PROJECT_DIR: .
-  PROJECT_FILE: HTVANTIX.xcodeproj
+  ZIP_FILE: HTV811D.zip
+  PROJECT_NAME: HTVANTIX.xcodeproj
   SCHEME: HTVANTIX
   CONFIGURATION: Release
-  BUNDLE_ID: com.adminfah.htvantix
+  BUNDLE_ID: app.maroon1006.garlic5667
   EXPORT_METHOD: ad-hoc
   CODE_SIGN_IDENTITY: Apple Distribution
 
@@ -22,6 +22,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Extract source and find Xcode project
+        run: |
+          set -euo pipefail
+
+          if [ -f "$ZIP_FILE" ]; then
+            rm -rf extracted
+            mkdir -p extracted
+            unzip -q "$ZIP_FILE" -d extracted -x "__MACOSX/*" "*/__MACOSX/*" "*.DS_Store"
+            SEARCH_ROOT="$GITHUB_WORKSPACE/extracted"
+          else
+            SEARCH_ROOT="$GITHUB_WORKSPACE"
+          fi
+
+          PROJECT_PATH="$(find "$SEARCH_ROOT" \
+            -path '*/__MACOSX/*' -prune -o \
+            -name "$PROJECT_NAME" -type d -print | head -n 1)"
+
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "Xcode project not found"
+            find "$SEARCH_ROOT" -name "*.xcodeproj" -print
+            exit 1
+          fi
+
+          echo "PROJECT_PATH=$PROJECT_PATH" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$(dirname "$PROJECT_PATH")" >> "$GITHUB_ENV"
+          echo "Using project: $PROJECT_PATH"
 
       - name: Install certificate and provisioning profile
         env:
@@ -61,10 +88,9 @@ jobs:
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
 
           xcodebuild archive \
-            -project "$PROJECT_FILE" \
+            -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
             -configuration "$CONFIGURATION" \
             -sdk iphoneos \
