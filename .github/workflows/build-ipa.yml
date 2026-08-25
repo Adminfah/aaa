@@ -3,7 +3,8 @@ name: Build IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -12,46 +13,136 @@ jobs:
   build:
     runs-on: macos-latest
 
-    defaults:
-      run:
-        working-directory: HTVANTIX_3105_BASE_UI_SECURITY_MERGE
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show repository files
+        run: |
+          echo "Current directory:"
+          pwd
+
+          echo "Repository files:"
+          find . -maxdepth 3 -type d | sort
 
       - name: Show Xcode version
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
 
-      - name: Build app unsigned
+      - name: Find Xcode project
+        id: project
+        shell: bash
         run: |
           set -euo pipefail
+
+          PROJECT_PATH="$(find "$GITHUB_WORKSPACE" \
+            -name 'HTVANTIX.xcodeproj' \
+            -type d \
+            -print \
+            -quit)"
+
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "ERROR: HTVANTIX.xcodeproj not found"
+            echo ""
+            echo "Available Xcode projects:"
+            find "$GITHUB_WORKSPACE" -name '*.xcodeproj' -type d || true
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_PATH")"
+
+          echo "Found project:"
+          echo "$PROJECT_PATH"
+
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
+
+          echo "project_path=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Show schemes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild \
+            -project "${{ steps.project.outputs.project_path }}" \
+            -list
+
+      - name: Build app unsigned
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_PATH="${{ steps.project.outputs.project_path }}"
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+          BUILD_DIR="$PROJECT_DIR/build"
+
+          echo "Building project:"
+          echo "$PROJECT_PATH"
+
           xcodebuild clean build \
-            -project HTVANTIX.xcodeproj \
+            -project "$PROJECT_PATH" \
             -scheme HTVANTIX \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath "$BUILD_DIR" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
       - name: Package IPA
+        shell: bash
         run: |
           set -euo pipefail
-          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -n 1)"
-          test -n "$APP_PATH"
 
-          rm -rf Payload ipa
-          mkdir -p Payload ipa
-          cp -R "$APP_PATH" Payload/
-          /usr/bin/zip -qry ipa/HTVANTIX-unsigned.ipa Payload
-          ls -lh ipa
+          PROJECT_DIR="${{ steps.project.outputs.project_dir }}"
+          BUILD_DIR="$PROJECT_DIR/build"
+          PRODUCT_DIR="$BUILD_DIR/Build/Products/Release-iphoneos"
+          IPA_DIR="$GITHUB_WORKSPACE/ipa"
+
+          echo "Searching for .app in:"
+          echo "$PRODUCT_DIR"
+
+          APP_PATH="$(find "$PRODUCT_DIR" \
+            -maxdepth 1 \
+            -name '*.app' \
+            -type d \
+            -print \
+            -quit)"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app file found"
+            find "$BUILD_DIR" -maxdepth 6 -type d -name '*.app' || true
+            exit 1
+          fi
+
+          echo "Found app:"
+          echo "$APP_PATH"
+
+          rm -rf "$GITHUB_WORKSPACE/Payload"
+          rm -rf "$IPA_DIR"
+
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+          mkdir -p "$IPA_DIR"
+
+          cp -R "$APP_PATH" "$GITHUB_WORKSPACE/Payload/"
+
+          cd "$GITHUB_WORKSPACE"
+
+          /usr/bin/zip \
+            -qry \
+            "$IPA_DIR/HTVANTIX-unsigned.ipa" \
+            Payload
+
+          echo "IPA created:"
+          ls -lh "$IPA_DIR"
 
       - name: Upload IPA
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: HTVANTIX-unsigned-ipa
-          path: HTVANTIX_3105_BASE_UI_SECURITY_MERGE/ipa/*.ipa
+          path: ipa/HTVANTIX-unsigned.ipa
           if-no-files-found: error
+          retention-days: 30
