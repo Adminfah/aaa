@@ -12,11 +12,10 @@ permissions:
 env:
   ZIP_FILE: HTV811D.zip
   PROJECT_NAME: HTVANTIX.xcodeproj
-  SCHEME: HTVANTIX
+  SCHEME_HINT: HTVANTIX
   CONFIGURATION: Release
-  BUNDLE_ID: com.apple.mobile.MobileHouseArrest
-  EXPORT_METHOD: ad-hoc
-  CODE_SIGN_IDENTITY: Apple Distribution
+  TEAM_ID: LH57Z7N28B
+  BUNDLE_ID: app.maroon1006.garlic5667
 
 jobs:
   build:
@@ -26,41 +25,282 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract project ZIP
+      - name: Show repository files
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwd
+          find "$GITHUB_WORKSPACE" -maxdepth 4 \
+            -path '*/.git/*' -prune -o \
+            -path '*/__MACOSX/*' -prune -o \
+            -print
+
+      - name: Extract source and locate project
+        id: locate
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf extracted
-          mkdir -p extracted
-
-          if [ -f "$ZIP_FILE" ]; then
-            unzip -q "$ZIP_FILE" -d extracted -x "__MACOSX/*" "*/__MACOSX/*" "*.DS_Store" "*/._*"
+          if [ -f "$GITHUB_WORKSPACE/$ZIP_FILE" ]; then
+            echo "Found $ZIP_FILE. Extracting..."
+            rm -rf "$GITHUB_WORKSPACE/extracted"
+            mkdir -p "$GITHUB_WORKSPACE/extracted"
+            unzip -q "$GITHUB_WORKSPACE/$ZIP_FILE" \
+              -d "$GITHUB_WORKSPACE/extracted" \
+              -x "__MACOSX/*" "*/__MACOSX/*" ".DS_Store" "*/.DS_Store" "._*" "*/._*"
+            find "$GITHUB_WORKSPACE/extracted" -type d -name "__MACOSX" -prune -exec rm -rf {} + || true
+            find "$GITHUB_WORKSPACE/extracted" -type f \( -name "._*" -o -name ".DS_Store" \) -delete || true
             SEARCH_ROOT="$GITHUB_WORKSPACE/extracted"
           else
+            echo "$ZIP_FILE not found. Using checked-out repository as source."
             SEARCH_ROOT="$GITHUB_WORKSPACE"
           fi
 
-          PROJECT_PATH="$(find "$SEARCH_ROOT" \
-            -path '*/__MACOSX/*' -prune -o \
-            -name "$PROJECT_NAME" -type d -print | while read -r p; do
-              if [ -f "$p/project.pbxproj" ]; then
-                echo "$p"
-                break
-              fi
-            done)"
+          PROJECT_PATH=""
+
+          while IFS= read -r candidate; do
+            if [ -f "$candidate/project.pbxproj" ]; then
+              PROJECT_PATH="$candidate"
+              break
+            fi
+          done < <(
+            find "$SEARCH_ROOT" \
+              -path '*/__MACOSX/*' -prune -o \
+              -type d \
+              -name "$PROJECT_NAME" \
+              -print
+          )
 
           if [ -z "$PROJECT_PATH" ]; then
-            echo "ERROR: valid Xcode project not found"
-            find "$SEARCH_ROOT" -name "*.xcodeproj" -print || true
+            while IFS= read -r candidate; do
+              if [ -f "$candidate/project.pbxproj" ]; then
+                PROJECT_PATH="$candidate"
+                break
+              fi
+            done < <(
+              find "$SEARCH_ROOT" \
+                -path '*/__MACOSX/*' -prune -o \
+                -type d \
+                -name "*.xcodeproj" \
+                -print
+            )
+          fi
+
+          if [ -z "$PROJECT_PATH" ]; then
+            echo "ERROR: No valid .xcodeproj containing project.pbxproj was found."
+            echo "All .xcodeproj directories:"
+            find "$SEARCH_ROOT" -path '*/__MACOSX/*' -prune -o -type d -name "*.xcodeproj" -print || true
+            echo "All project.pbxproj files:"
+            find "$SEARCH_ROOT" -path '*/__MACOSX/*' -prune -o -name "project.pbxproj" -print || true
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_PATH")"
+          WORKSPACE_PATH=""
 
-          echo "PROJECT_PATH=$PROJECT_PATH" >> "$GITHUB_ENV"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Using project: $PROJECT_PATH"
+          while IFS= read -r candidate; do
+            WORKSPACE_PATH="$candidate"
+            break
+          done < <(
+            find "$PROJECT_DIR" \
+              -maxdepth 1 \
+              -type d \
+              -name "*.xcworkspace" \
+              -print
+          )
+
+          if [ -n "$WORKSPACE_PATH" ]; then
+            BUILD_MODE="workspace"
+            BUILD_CONTAINER="$WORKSPACE_PATH"
+          else
+            BUILD_MODE="project"
+            BUILD_CONTAINER="$PROJECT_PATH"
+          fi
+
+          {
+            echo "SEARCH_ROOT=$SEARCH_ROOT"
+            echo "PROJECT_PATH=$PROJECT_PATH"
+            echo "PROJECT_DIR=$PROJECT_DIR"
+            echo "WORKSPACE_PATH=$WORKSPACE_PATH"
+            echo "BUILD_MODE=$BUILD_MODE"
+            echo "BUILD_CONTAINER=$BUILD_CONTAINER"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "search_root=$SEARCH_ROOT"
+            echo "project_path=$PROJECT_PATH"
+            echo "project_dir=$PROJECT_DIR"
+            echo "workspace_path=$WORKSPACE_PATH"
+            echo "build_mode=$BUILD_MODE"
+            echo "build_container=$BUILD_CONTAINER"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Project: $PROJECT_PATH"
+          if [ -n "$WORKSPACE_PATH" ]; then
+            echo "Workspace: $WORKSPACE_PATH"
+          fi
+          echo "Build mode: $BUILD_MODE"
+
+      - name: Apply CI source fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$PROJECT_DIR" "$PROJECT_PATH" "$BUNDLE_ID" <<'PY'
+          from pathlib import Path
+          import sys
+
+          project_dir = Path(sys.argv[1])
+          project_path = Path(sys.argv[2])
+          bundle_id = sys.argv[3]
+
+          pbxproj = project_path / "project.pbxproj"
+          if pbxproj.exists():
+              text = pbxproj.read_text(encoding="utf-8")
+              updated = text.replace(
+                  "PRODUCT_BUNDLE_IDENTIFIER = com.apple.mobile.MobileHouseArrest;",
+                  f"PRODUCT_BUNDLE_IDENTIFIER = {bundle_id};",
+              )
+              if updated != text:
+                  pbxproj.write_text(updated, encoding="utf-8")
+                  print(f"Updated PRODUCT_BUNDLE_IDENTIFIER in {pbxproj}")
+
+          for swift_file in project_dir.rglob("V4APIClient.swift"):
+              text = swift_file.read_text(encoding="utf-8")
+              if "UIDevice.current.model" in text and "let deviceModel = await MainActor.run" not in text:
+                  old = '''        let body: [String: String] = [
+                      "key": key,
+                      "deviceId": DeviceIdentity.id,
+                      "appVersion": BuildIdentity.version,
+                      "buildId": BuildIdentity.buildID,
+                      "deviceModel": UIDevice.current.model
+                  ]'''
+                  new = '''        let deviceModel = await MainActor.run {
+                      UIDevice.current.model
+                  }
+
+                  let body: [String: String] = [
+                      "key": key,
+                      "deviceId": DeviceIdentity.id,
+                      "appVersion": BuildIdentity.version,
+                      "buildId": BuildIdentity.buildID,
+                      "deviceModel": deviceModel
+                  ]'''
+                  updated = text.replace(old, new)
+                  if updated != text:
+                      swift_file.write_text(updated, encoding="utf-8")
+                      print(f"Updated UIKit main-actor access in {swift_file}")
+
+          for swift_file in project_dir.rglob("PrivacyShield.swift"):
+              text = swift_file.read_text(encoding="utf-8")
+              replacements = {
+                  '''        ) { [weak self] _ in
+                      self?.screenCaptured = UIScreen.main.isCaptured
+                  })''': '''        ) { [weak self] _ in
+                      Task { @MainActor [weak self] in
+                          self?.screenCaptured = UIScreen.main.isCaptured
+                      }
+                  })''',
+                  '''        ) { [weak self] _ in
+                      self?.appInactive = true
+                  })''': '''        ) { [weak self] _ in
+                      Task { @MainActor [weak self] in
+                          self?.appInactive = true
+                      }
+                  })''',
+                  '''        ) { [weak self] _ in
+                      self?.appInactive = false
+                      self?.screenCaptured = UIScreen.main.isCaptured
+                  })''': '''        ) { [weak self] _ in
+                      Task { @MainActor [weak self] in
+                          self?.appInactive = false
+                          self?.screenCaptured = UIScreen.main.isCaptured
+                      }
+                  })''',
+              }
+              updated = text
+              for old, new in replacements.items():
+                  updated = updated.replace(old, new)
+              if updated != text:
+                  swift_file.write_text(updated, encoding="utf-8")
+                  print(f"Updated notification main-actor handling in {swift_file}")
+          PY
+
+      - name: Show Xcode version
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Resolve scheme and build settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$BUILD_MODE" = "workspace" ]; then
+            REF_ARGS=(-workspace "$BUILD_CONTAINER")
+          else
+            REF_ARGS=(-project "$BUILD_CONTAINER")
+          fi
+
+          echo "Available schemes:"
+          xcodebuild "${REF_ARGS[@]}" -list
+
+          SCHEME_JSON="$RUNNER_TEMP/schemes.json"
+          xcodebuild "${REF_ARGS[@]}" -list -json > "$SCHEME_JSON"
+
+          REAL_SCHEME="$(
+            SCHEME_HINT="$SCHEME_HINT" ruby -rjson -e '
+              data = JSON.parse(File.read(ARGV[0]))
+              root = data["workspace"] || data["project"] || {}
+              schemes = root["schemes"] || []
+              hint = ENV["SCHEME_HINT"]
+              abort "ERROR: no shared Xcode schemes found" if schemes.empty?
+              puts(schemes.include?(hint) ? hint : schemes.first)
+            ' "$SCHEME_JSON"
+          )"
+
+          echo "REAL_SCHEME=$REAL_SCHEME" >> "$GITHUB_ENV"
+          echo "Using scheme: $REAL_SCHEME"
+
+          BUILD_SETTINGS="$RUNNER_TEMP/build-settings.txt"
+          xcodebuild "${REF_ARGS[@]}" \
+            -scheme "$REAL_SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-settings" \
+            -showBuildSettings > "$BUILD_SETTINGS"
+
+          TARGET_NAME="$(awk -F' = ' '/^[[:space:]]+TARGET_NAME = / {print $2; exit}' "$BUILD_SETTINGS")"
+          INFO_PLIST="$(awk -F' = ' '/^[[:space:]]+PRODUCT_SETTINGS_PATH = / {print $2; exit}' "$BUILD_SETTINGS")"
+          CURRENT_BUNDLE_ID="$(awk -F' = ' '/^[[:space:]]+PRODUCT_BUNDLE_IDENTIFIER = / {print $2; exit}' "$BUILD_SETTINGS")"
+          DEPLOYMENT_TARGET="$(awk -F' = ' '/^[[:space:]]+IPHONEOS_DEPLOYMENT_TARGET = / {print $2; exit}' "$BUILD_SETTINGS")"
+          HEADER_SEARCH_PATHS="$(awk -F' = ' '/^[[:space:]]+HEADER_SEARCH_PATHS = / {print $2; exit}' "$BUILD_SETTINGS")"
+          FRAMEWORK_SEARCH_PATHS="$(awk -F' = ' '/^[[:space:]]+FRAMEWORK_SEARCH_PATHS = / {print $2; exit}' "$BUILD_SETTINGS")"
+          LIBRARY_SEARCH_PATHS="$(awk -F' = ' '/^[[:space:]]+LIBRARY_SEARCH_PATHS = / {print $2; exit}' "$BUILD_SETTINGS")"
+
+          if [ -z "$TARGET_NAME" ] || [ -z "$INFO_PLIST" ] || [ ! -f "$INFO_PLIST" ]; then
+            echo "ERROR: Could not resolve target or Info.plist from Xcode build settings."
+            echo "TARGET_NAME=$TARGET_NAME"
+            echo "INFO_PLIST=$INFO_PLIST"
+            exit 1
+          fi
+
+          {
+            echo "TARGET_NAME=$TARGET_NAME"
+            echo "INFO_PLIST=$INFO_PLIST"
+          } >> "$GITHUB_ENV"
+
+          echo "Resolved target: $TARGET_NAME"
+          echo "Resolved Info.plist: $INFO_PLIST"
+          echo "Current bundle id: $CURRENT_BUNDLE_ID"
+          echo "Required bundle id: $BUNDLE_ID"
+          echo "Deployment target: $DEPLOYMENT_TARGET"
+          echo "Header search paths: ${HEADER_SEARCH_PATHS:-<empty>}"
+          echo "Framework search paths: ${FRAMEWORK_SEARCH_PATHS:-<empty>}"
+          echo "Library search paths: ${LIBRARY_SEARCH_PATHS:-<empty>}"
 
       - name: Configure bundle id and app token
         env:
@@ -69,127 +309,345 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$HTVANTIX_APP_TOKEN" ]; then
-            echo "ERROR: GitHub secret HTVANTIX_APP_TOKEN is empty or missing"
-            exit 1
-          fi
-
-          INFO_PLIST="$PROJECT_DIR/HTVANTIX/Info.plist"
-
-          if [ ! -f "$INFO_PLIST" ]; then
-            echo "ERROR: Info.plist not found at $INFO_PLIST"
-            find "$PROJECT_DIR" -name "Info.plist" -print || true
+          if [ -z "${HTVANTIX_APP_TOKEN:-}" ]; then
+            echo "ERROR: GitHub secret HTVANTIX_APP_TOKEN is empty or missing."
             exit 1
           fi
 
           plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$INFO_PLIST"
           plutil -replace HTVANTIXAppToken -string "$HTVANTIX_APP_TOKEN" "$INFO_PLIST"
 
-          echo "Bundle ID:"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$INFO_PLIST"
-          echo "HTVANTIX_APP_TOKEN loaded"
+          UPDATED_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST")"
+          if [ "$UPDATED_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+            echo "ERROR: Info.plist bundle id was not updated correctly."
+            exit 1
+          fi
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+          TOKEN_VALUE="$(/usr/libexec/PlistBuddy -c 'Print :HTVANTIXAppToken' "$INFO_PLIST")"
+          if [ -z "$TOKEN_VALUE" ] || [ "$TOKEN_VALUE" = "__HTVANTIX_APP_TOKEN__" ]; then
+            echo "ERROR: HTVANTIXAppToken was not injected into Info.plist."
+            exit 1
+          fi
 
-      - name: Install certificate and provisioning profile
+          echo "Info.plist bundle id updated to $UPDATED_BUNDLE_ID"
+          echo "HTVANTIX app token injected"
+
+      - name: Smoke build without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$BUILD_MODE" = "workspace" ]; then
+            REF_ARGS=(-workspace "$BUILD_CONTAINER")
+          else
+            REF_ARGS=(-project "$BUILD_CONTAINER")
+          fi
+
+          rm -rf "$RUNNER_TEMP/UnsignedBuild"
+          xcodebuild clean build \
+            "${REF_ARGS[@]}" \
+            -scheme "$REAL_SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/UnsignedBuild" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee "$RUNNER_TEMP/unsigned-build.log"
+
+      - name: Install and validate signing assets
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
         shell: bash
         run: |
           set -euo pipefail
 
+          require_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "ERROR: GitHub secret $name is empty or missing."
+              exit 1
+            fi
+          }
+
+          decode_secret_file() {
+            local label="$1"
+            local value="$2"
+            local output="$3"
+
+            if ! printf '%s' "$value" | base64 --decode > "$output" 2>/dev/null; then
+              echo "ERROR: $label is not valid Base64."
+              exit 1
+            fi
+
+            if [ ! -s "$output" ]; then
+              echo "ERROR: decoded $label is empty."
+              exit 1
+            fi
+          }
+
+          require_secret BUILD_CERTIFICATE_BASE64 "$BUILD_CERTIFICATE_BASE64"
+          require_secret P12_PASSWORD "$P12_PASSWORD"
+          require_secret BUILD_PROVISION_PROFILE_BASE64 "$BUILD_PROVISION_PROFILE_BASE64"
+          require_secret KEYCHAIN_PASSWORD "$KEYCHAIN_PASSWORD"
+          require_secret DEVELOPMENT_TEAM "$DEVELOPMENT_TEAM"
+
+          if [ "$DEVELOPMENT_TEAM" != "$TEAM_ID" ]; then
+            echo "ERROR: DEVELOPMENT_TEAM secret must be $TEAM_ID, got $DEVELOPMENT_TEAM."
+            exit 1
+          fi
+
           CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
           PP_PATH="$RUNNER_TEMP/build_pp.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
 
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
-          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+          decode_secret_file BUILD_CERTIFICATE_BASE64 "$BUILD_CERTIFICATE_BASE64" "$CERTIFICATE_PATH"
+          decode_secret_file BUILD_PROVISION_PROFILE_BASE64 "$BUILD_PROVISION_PROFILE_BASE64" "$PP_PATH"
+
+          if ! openssl pkcs12 \
+            -in "$CERTIFICATE_PATH" \
+            -passin "pass:$P12_PASSWORD" \
+            -info \
+            -noout > "$RUNNER_TEMP/p12-info.log" 2> "$RUNNER_TEMP/p12-error.log"; then
+            echo "ERROR: P12 validation failed."
+            echo "Possible causes: BUILD_CERTIFICATE_BASE64 is wrong, P12_PASSWORD is wrong, or the file is not PKCS#12."
+            echo "OpenSSL diagnostic:"
+            tail -n 20 "$RUNNER_TEMP/p12-error.log"
+            exit 1
+          fi
+
+          if ! security cms -D -i "$PP_PATH" > "$PROFILE_PLIST"; then
+            echo "ERROR: BUILD_PROVISION_PROFILE_BASE64 did not decode to a valid .mobileprovision file."
+            exit 1
+          fi
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          if ! security import "$CERTIFICATE_PATH" \
+            -P "$P12_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"; then
+            echo "ERROR: Could not import .p12 into the temporary keychain."
+            echo "Possible causes: invalid P12 Base64, wrong P12 password, or missing private key."
+            exit 1
+          fi
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
-          security cms -D -i "$PP_PATH" > "$RUNNER_TEMP/profile.plist"
+          echo "Imported code signing identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
+          python3 - "$PROFILE_PLIST" "$KEYCHAIN_PATH" "$TEAM_ID" "$BUNDLE_ID" <<'PY'
+          import hashlib
+          import os
+          import plistlib
+          import re
+          import subprocess
+          import sys
+          import tempfile
+
+          profile_plist, keychain_path, team_id, bundle_id = sys.argv[1:5]
+          expected_app_id = f"{team_id}.{bundle_id}"
+
+          with open(profile_plist, "rb") as fh:
+              profile = plistlib.load(fh)
+
+          uuid = profile.get("UUID", "")
+          name = profile.get("Name", "")
+          teams = profile.get("TeamIdentifier") or []
+          team = teams[0] if teams else ""
+          entitlements = profile.get("Entitlements") or {}
+          app_identifier = entitlements.get("application-identifier", "")
+          get_task_allow = bool(entitlements.get("get-task-allow", False))
+          expiration = profile.get("ExpirationDate")
+          provisioned_devices = profile.get("ProvisionedDevices") or []
+          provisions_all_devices = bool(profile.get("ProvisionsAllDevices", False))
+          developer_certs = profile.get("DeveloperCertificates") or []
+
+          errors = []
+          if team != team_id:
+              errors.append(f"TeamIdentifier mismatch: expected {team_id}, got {team or '<empty>'}")
+          if app_identifier != expected_app_id:
+              errors.append(f"application-identifier mismatch: expected {expected_app_id}, got {app_identifier or '<empty>'}")
+          if not developer_certs:
+              errors.append("profile has no DeveloperCertificates entries")
+
+          if provisions_all_devices:
+              export_method = "enterprise"
+          elif provisioned_devices:
+              export_method = "debugging" if get_task_allow else "release-testing"
+          else:
+              export_method = "app-store-connect"
+
+          profile_cert_sha1s = []
+          profile_cert_names = []
+          for cert in developer_certs:
+              cert_bytes = bytes(cert)
+              sha1 = hashlib.sha1(cert_bytes).hexdigest().upper()
+              profile_cert_sha1s.append(sha1)
+              with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                  tmp.write(cert_bytes)
+                  tmp_path = tmp.name
+              try:
+                  subject = subprocess.run(
+                      ["openssl", "x509", "-inform", "DER", "-in", tmp_path, "-noout", "-subject"],
+                      text=True,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE,
+                      check=False,
+                  ).stdout.strip()
+                  match = re.search(r"CN\\s*=\\s*([^,/]+)", subject)
+                  profile_cert_names.append(match.group(1) if match else subject)
+              finally:
+                  try:
+                      os.unlink(tmp_path)
+                  except OSError:
+                      pass
+
+          identities_output = subprocess.run(
+              ["security", "find-identity", "-v", "-p", "codesigning", keychain_path],
+              text=True,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              check=False,
+          ).stdout
+
+          identities = re.findall(r'\\)\\s+([A-Fa-f0-9]{40})\\s+"([^"]+)"', identities_output)
+          matched = [
+              (sha.upper(), identity_name)
+              for sha, identity_name in identities
+              if sha.upper() in profile_cert_sha1s
+          ]
+
+          if not matched:
+              imported_names = ", ".join(name for _, name in identities) or "<none>"
+              profile_names = ", ".join(profile_cert_names) or "<unreadable>"
+              errors.append(
+                  "no imported signing identity matches DeveloperCertificates in the provisioning profile; "
+                  f"imported identities: {imported_names}; profile certificates: {profile_names}"
+              )
+
+          if errors:
+              for error in errors:
+                  print(f"ERROR: {error}")
+              sys.exit(1)
+
+          signing_sha1, signing_name = matched[0]
+
+          print(f"Profile UUID: {uuid}")
+          print(f"Profile Name: {name}")
+          print(f"Profile TeamIdentifier: {team}")
+          print(f"Profile application-identifier: {app_identifier}")
+          print(f"Profile ExpirationDate: {expiration}")
+          print(f"Provisioned devices: {len(provisioned_devices)}")
+          print(f"Export method: {export_method}")
+          print(f"Signing identity: {signing_name}")
+
+          env_path = os.environ["GITHUB_ENV"]
+          with open(env_path, "a", encoding="utf-8") as env:
+              env.write(f"PROFILE_UUID={uuid}\n")
+              env.write(f"PROFILE_NAME={name}\n")
+              env.write(f"PROFILE_TEAM={team}\n")
+              env.write(f"PROFILE_APP_IDENTIFIER={app_identifier}\n")
+              env.write(f"EXPORT_METHOD={export_method}\n")
+              env.write(f"SIGNING_IDENTITY_SHA1={signing_sha1}\n")
+              env.write(f"SIGNING_IDENTITY_NAME={signing_name}\n")
+          PY
 
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
 
-          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-      - name: Show available schemes
-        shell: bash
-        run: xcodebuild -project "$PROJECT_PATH" -list
-
       - name: Archive signed app
-        env:
-          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
         shell: bash
         run: |
           set -euo pipefail
 
+          if [ "$BUILD_MODE" = "workspace" ]; then
+            REF_ARGS=(-workspace "$BUILD_CONTAINER")
+          else
+            REF_ARGS=(-project "$BUILD_CONTAINER")
+          fi
+
+          rm -rf "$RUNNER_TEMP/HTVANTIX.xcarchive"
+
           xcodebuild archive \
-            -project "$PROJECT_PATH" \
-            -scheme "$SCHEME" \
+            "${REF_ARGS[@]}" \
+            -scheme "$REAL_SCHEME" \
             -configuration "$CONFIGURATION" \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath "$RUNNER_TEMP/HTVANTIX.xcarchive" \
-            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
             CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY_NAME" \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
-            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH" \
+            2>&1 | tee "$RUNNER_TEMP/archive.log"
 
       - name: Export signed IPA
-        env:
-          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
         shell: bash
         run: |
           set -euo pipefail
 
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>method</key>
-            <string>${EXPORT_METHOD}</string>
-            <key>teamID</key>
-            <string>${DEVELOPMENT_TEAM}</string>
-            <key>signingStyle</key>
-            <string>manual</string>
-            <key>signingCertificate</key>
-            <string>${CODE_SIGN_IDENTITY}</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>${BUNDLE_ID}</key>
-              <string>${PROFILE_NAME}</string>
-            </dict>
-          </dict>
-          </plist>
-          EOF
+          EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+
+          python3 - "$EXPORT_OPTIONS" <<'PY'
+          import os
+          import plistlib
+          import sys
+
+          export_options = {
+              "method": os.environ["EXPORT_METHOD"],
+              "destination": "export",
+              "teamID": os.environ["TEAM_ID"],
+              "signingStyle": "manual",
+              "signingCertificate": os.environ["SIGNING_IDENTITY_SHA1"],
+              "provisioningProfiles": {
+                  os.environ["BUNDLE_ID"]: os.environ["PROFILE_UUID"],
+              },
+              "compileBitcode": False,
+              "stripSwiftSymbols": True,
+          }
+
+          with open(sys.argv[1], "wb") as fh:
+              plistlib.dump(export_options, fh)
+          PY
+
+          plutil -p "$EXPORT_OPTIONS"
 
           rm -rf "$GITHUB_WORKSPACE/ipa"
           mkdir -p "$GITHUB_WORKSPACE/ipa"
 
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/HTVANTIX.xcarchive" \
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
-            -exportPath "$GITHUB_WORKSPACE/ipa"
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            -exportPath "$GITHUB_WORKSPACE/ipa" \
+            2>&1 | tee "$RUNNER_TEMP/export.log"
 
-          ls -lh "$GITHUB_WORKSPACE/ipa"
+          echo "IPA output:"
+          find "$GITHUB_WORKSPACE/ipa" -maxdepth 1 -type f -name "*.ipa" -print -exec ls -lh {} \;
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -198,3 +656,14 @@ jobs:
           path: ipa/*.ipa
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HTVANTIX-build-diagnostics
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.json
+          if-no-files-found: ignore
+          retention-days: 7
